@@ -407,19 +407,58 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         return true;
     }
 
-    private async SyncTask<bool> LeftClick(bool shift, bool alt)
+    /// <summary>
+    /// Left-clicks the current mouse position. Shift is expected to be held already (see <see cref="HoldShift"/>);
+    /// Alt is pressed only for the duration of the click.
+    /// </summary>
+    private async SyncTask<bool> LeftClick(bool alt)
     {
-        if (shift) Input.KeyDown(Keys.LShiftKey);
-        if (alt) Input.KeyDown(Keys.LMenu);
-        await Wait(30);
+        if (alt)
+        {
+            Input.KeyDown(Keys.LMenu);
+            await WaitUntil(() => Input.IsKeyDown(Keys.LMenu), 150);
+            await Wait(30);
+        }
+
         Input.LeftDown();
         await Wait(25);
         Input.LeftUp();
         await Wait(30);
         if (alt) Input.KeyUp(Keys.LMenu);
-        if (shift) Input.KeyUp(Keys.LShiftKey);
         await Wait(Settings.ClickDelay.Value);
         return true;
+    }
+
+    private bool _shiftHeld;
+
+    /// <summary>Presses and keeps Shift down so every click keeps the orb on the cursor. Waits until the game sees the key.</summary>
+    private async SyncTask<bool> HoldShift()
+    {
+        if (_shiftHeld && Input.IsKeyDown(Keys.LShiftKey)) return true;
+        Input.KeyDown(Keys.LShiftKey);
+        _shiftHeld = true;
+        if (!await WaitUntil(() => Input.IsKeyDown(Keys.LShiftKey), 200))
+        {
+            Debug("Shift key state did not register after KeyDown");
+        }
+
+        await Wait(30);
+        return true;
+    }
+
+    private async SyncTask<bool> ReleaseShift()
+    {
+        if (!_shiftHeld && !Input.IsKeyDown(Keys.LShiftKey)) return true;
+        Input.KeyUp(Keys.LShiftKey);
+        _shiftHeld = false;
+        await WaitUntil(() => !Input.IsKeyDown(Keys.LShiftKey), 200);
+        await Wait(30);
+        return true;
+    }
+
+    private void Debug(string message)
+    {
+        if (Settings.DebugLog.Value) LogMessage($"MapRoller: {message}", 5);
     }
 
     private async SyncTask<bool> RightClick()
@@ -436,6 +475,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         Input.KeyUp(Keys.LShiftKey);
         Input.KeyUp(Keys.LMenu);
         Input.KeyUp(Keys.LControlKey);
+        _shiftHeld = false;
     }
 
     private bool Fail(string reason)
@@ -458,6 +498,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
             return true;
         }
 
+        await ReleaseShift();
         Input.KeyPressRelease(Keys.Escape);
         var ok = await WaitUntil(() => !CursorBusy(), Settings.ChangeTimeout.Value);
         if (ok) _held = null;
@@ -468,8 +509,19 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
     {
         if (Holding(orb)) return true;
 
+        if (Settings.DebugLog.Value)
+        {
+            var cursor = CursorElement;
+            string itemName = null;
+            try { itemName = cursor?.ItemType?.BaseName; } catch { }
+            Debug($"Need {OrbIds[orb].Name}; cursor action={cursor?.Action}, item='{itemName ?? "?"}', shiftHeld={_shiftHeld}, shiftDown={Input.IsKeyDown(Keys.LShiftKey)}");
+        }
+
         if (!await ReleaseCursor())
             return Fail("Could not clear the cursor: Escape did not cancel the held orb.");
+
+        // Shift + right click on a stack would open the split dialog instead of picking the orb up
+        await ReleaseShift();
 
         var stack = OrbStacks(orb).OrderByDescending(StackSize).FirstOrDefault();
         var switchedTab = false;
@@ -533,6 +585,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
     {
         if (tabIndex < 0) return Fail("No stash tab to switch to.");
 
+        await ReleaseShift();
         for (var attempt = 0; attempt < 3; attempt++)
         {
             var current = CurrentTabIndex;
@@ -594,8 +647,9 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         if (map == null) return Fail($"The map at {key.X},{key.Y} disappeared from the stash tab.");
         if (!GameFocused()) return Fail("The game window is not in the foreground.");
 
+        await HoldShift();
         await MoveTo(map.Element.GetClientRect());
-        await LeftClick(shift: true, alt: useAlt);
+        await LeftClick(alt: useAlt);
 
         var applied = await WaitUntil(() => FindMap(key) is { } m && changed(m), Settings.ChangeTimeout.Value);
         if (!applied) return false;
@@ -613,6 +667,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         _savedClipboard = GetClipboardText();
         SetClipboardText(text);
 
+        await ReleaseShift();
         Input.KeyDown(Keys.LControlKey);
         await Wait(30);
         Input.KeyPressRelease(Keys.F);

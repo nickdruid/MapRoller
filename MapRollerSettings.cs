@@ -72,6 +72,9 @@ public class MapRollerSettings : ISettings
     [Menu("Show status overlay")]
     public ToggleNode ShowOverlay { get; set; } = new(true);
 
+    [Menu("Debug log", "Write extra messages to the HUD log, e.g. why an orb had to be picked up again.")]
+    public ToggleNode DebugLog { get; set; } = new(false);
+
     [Menu("Draw frames around maps", "Green = done, yellow = waiting for exalts, orange = needs rolling, red = given up, grey = cannot be rolled.")]
     public ToggleNode DrawMapFrames { get; set; } = new(true);
 }
