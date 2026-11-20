@@ -233,6 +233,8 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
                 baseComponent?.isCorrupted ?? false));
         }
 
+        // grid order: top row first, left to right (the HUD returns items in memory order)
+        result.Sort((a, b) => a.Key.Y != b.Key.Y ? a.Key.Y.CompareTo(b.Key.Y) : a.Key.X.CompareTo(b.Key.X));
         return result;
     }
 
@@ -417,15 +419,19 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         {
             Input.KeyDown(Keys.LMenu);
             await WaitUntil(() => Input.IsKeyDown(Keys.LMenu), 150);
-            await Wait(30);
+            await Wait(10);
         }
 
         Input.LeftDown();
-        await Wait(25);
+        await Wait(15);
         Input.LeftUp();
-        await Wait(30);
-        if (alt) Input.KeyUp(Keys.LMenu);
-        await Wait(Settings.ClickDelay.Value);
+        if (alt)
+        {
+            await Wait(15);
+            Input.KeyUp(Keys.LMenu);
+        }
+
+        // no trailing pause here: the caller waits for the item to change, which covers the server round-trip
         return true;
     }
 
