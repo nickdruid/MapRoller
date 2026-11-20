@@ -43,10 +43,13 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         public int Scours;
         public int Exalts;
         public int Bricks;
+        public int Misses; // clicks in a row that had no effect on this map
         public bool GaveUp;
         public bool ExaltDone;
         public string Note = "";
     }
+
+    private sealed record SweepTarget((int X, int Y) Key, Func<MapInfo, bool> Changed);
 
     private sealed record MapInfo(
         NormalInventoryItem Element,
@@ -243,6 +246,13 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         return ScanMaps().FirstOrDefault(m => m.Key == key);
     }
 
+    private Dictionary<(int X, int Y), MapInfo> MapsByKey()
+    {
+        var result = new Dictionary<(int X, int Y), MapInfo>();
+        foreach (var map in ScanMaps()) result[map.Key] = map;
+        return result;
+    }
+
     private MapState State(MapInfo map) => State(map.Key);
 
     private MapState State((int X, int Y) key)
@@ -417,28 +427,30 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
     }
 
     /// <summary>
-    /// Left-clicks the current mouse position. Shift is expected to be held already (see <see cref="HoldShift"/>);
-    /// Alt is pressed only for the duration of the click.
+    /// Left-clicks the current mouse position. Shift (and Alt for scouring) are expected to be held already.
+    /// No trailing pause: the sweep moves straight on to the next map and verifies all of them afterwards.
     /// </summary>
-    private async SyncTask<bool> LeftClick(bool alt)
+    private async SyncTask<bool> LeftClick()
     {
-        if (alt)
-        {
-            Input.KeyDown(Keys.LMenu);
-            await WaitUntil(() => Input.IsKeyDown(Keys.LMenu), 150);
-            await Wait(10);
-        }
-
         Input.LeftDown();
         await Wait(15);
         Input.LeftUp();
-        if (alt)
-        {
-            await Wait(15);
-            Input.KeyUp(Keys.LMenu);
-        }
+        return true;
+    }
 
-        // no trailing pause here: the caller waits for the item to change, which covers the server round-trip
+    private async SyncTask<bool> HoldAlt()
+    {
+        Input.KeyDown(Keys.LMenu);
+        await WaitUntil(() => Input.IsKeyDown(Keys.LMenu), 150);
+        await Wait(10);
+        return true;
+    }
+
+    private async SyncTask<bool> ReleaseAlt()
+    {
+        await Wait(15);
+        Input.KeyUp(Keys.LMenu);
+        await WaitUntil(() => !Input.IsKeyDown(Keys.LMenu), 150);
         return true;
     }
 
@@ -643,50 +655,126 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
     /// Uses one orb on the map at <paramref name="key"/> and waits until <paramref name="changed"/> is true.
     /// Returns false without aborting when the map did not change within the timeout.
     /// </summary>
-    private async SyncTask<bool> ApplyOrb(Orb orb, (int X, int Y) key, Func<MapInfo, bool> changed)
+    /// <summary>
+    /// Uses one <paramref name="orb"/> on every target, in grid order, without waiting for the server between maps.
+    /// After the sweep it waits once for all clicked maps to change. The game processes each click in order, so
+    /// the round-trip is paid once per sweep instead of once per map.
+    /// Returns, for every map that was clicked, whether it changed. Maps that were not clicked (sweep cut short)
+    /// are absent. Returns null when the run aborted (cancel, lost focus, or the orb ran out everywhere).
+    /// </summary>
+    private async SyncTask<Dictionary<(int X, int Y), bool>> Sweep(Orb orb, List<SweepTarget> targets, string verb)
     {
         var useAlt = orb == Orb.Scouring && Settings.UseAltScourSwap.Value;
         var orbToHold = useAlt ? Orb.Alchemy : orb;
+        var results = new Dictionary<(int X, int Y), bool>();
+        var index = 0;
+        var pickups = 0;
+        var altHeld = false;
 
-        // Two attempts: the held stack can run dry on the click itself. The game then drops the orb from the
-        // cursor (after pulling from every stack it can reach, including hidden tabs); a second EnsureHolding
-        // looks for another stack and only fails when there is none anywhere.
-        for (var attempt = 0; attempt < 2; attempt++)
+        try
         {
-            if (!await EnsureHolding(orbToHold)) return false;
-
-            var map = FindMap(key);
-            if (map == null) return Fail($"The map at {key.X},{key.Y} disappeared from the stash tab.");
-            if (!GameFocused()) return Fail("The game window is not in the foreground.");
-
-            await HoldShift();
-            await MoveTo(map.Element.GetClientRect());
-            await LeftClick(alt: useAlt);
-
-            bool Changed() => FindMap(key) is { } m && changed(m);
-
-            await WaitUntil(() => Changed() || !CursorBusy(), Settings.ChangeTimeout.Value);
-            if (!Changed() && !CursorBusy())
+            while (index < targets.Count)
             {
-                // the cursor let go of the orb; give the server response a moment in case the map still changes
-                await WaitUntil(Changed, Math.Max(250, Settings.ClickDelay.Value * 4));
+                if (_cancelRequested)
+                {
+                    Fail(StashOpen ? "Stopped by hotkey." : "The stash was closed.");
+                    return null;
+                }
+
+                // first iteration: pick the orb up; later iterations: the stack ran dry and a new one is needed
+                if (!await EnsureHolding(orbToHold)) return null;
+                if (++pickups > targets.Count + 2)
+                {
+                    Fail($"The {OrbIds[orbToHold].Name} keeps dropping off the cursor right after it is picked up.");
+                    return null;
+                }
+
+                // with a reserve configured, do not click more maps than the counted spare orbs allow
+                var budget = Reserve(orb) > 0 ? Math.Max(0, CountOrbs(orb) - Reserve(orb)) : int.MaxValue;
+                if (budget == 0)
+                {
+                    _status = ReserveMessage(orb);
+                    break;
+                }
+
+                var maps = MapsByKey();
+                var pending = new List<SweepTarget>();
+
+                await HoldShift();
+                if (useAlt && !altHeld)
+                {
+                    await HoldAlt();
+                    altHeld = true;
+                }
+
+                for (; index < targets.Count; index++)
+                {
+                    if (_cancelRequested || !GameFocused()) break;
+                    if (pending.Count >= budget) break;
+                    if (_actions + pending.Count >= Settings.MaxActionsPerRun.Value) break;
+
+                    var target = targets[index];
+                    if (!maps.TryGetValue(target.Key, out var map)) continue;
+
+                    // the stack ran dry: stop clicking, let the pending clicks land, then pick a new stack up
+                    if (!CursorBusy()) break;
+
+                    _status = $"{verb} {index + 1}/{targets.Count}: {map.Name}";
+                    await MoveTo(map.Element.GetClientRect());
+                    await LeftClick();
+                    pending.Add(target);
+                }
+
+                if (pending.Count > 0)
+                {
+                    _status = $"{verb}: waiting for {pending.Count} maps to change";
+                    var timeout = Settings.ChangeTimeout.Value + 25 * pending.Count;
+                    await WaitUntil(() =>
+                    {
+                        var now = MapsByKey();
+                        return pending.All(t => now.TryGetValue(t.Key, out var m) && t.Changed(m));
+                    }, timeout);
+                    await Wait(Settings.HighlightSettleDelay.Value);
+
+                    var after = MapsByKey();
+                    foreach (var target in pending)
+                    {
+                        var changed = after.TryGetValue(target.Key, out var m) && target.Changed(m);
+                        results[target.Key] = changed;
+                        if (!changed) continue;
+                        _actions++;
+                        NoteOrbConsumed(orb);
+                    }
+                }
+
+                if (_cancelRequested)
+                {
+                    Fail(StashOpen ? "Stopped by hotkey." : "The stash was closed.");
+                    return null;
+                }
+
+                if (!GameFocused())
+                {
+                    Fail("The game window is not in the foreground.");
+                    return null;
+                }
+
+                if (_actions >= Settings.MaxActionsPerRun.Value) break;
+                if (pending.Count >= budget && budget != int.MaxValue) break;
+
+                if (index < targets.Count && !CursorBusy())
+                {
+                    _held = null;
+                    Debug($"The {OrbIds[orbToHold].Name} stack ran dry after {pending.Count} clicks; looking for another one.");
+                }
             }
-
-            if (Changed())
-            {
-                _actions++;
-                NoteOrbConsumed(orb);
-                await Wait(Settings.HighlightSettleDelay.Value);
-                return true;
-            }
-
-            if (CursorBusy()) return false; // orb still on the cursor, the click just had no effect
-
-            _held = null;
-            Debug($"The {OrbIds[orbToHold].Name} stack ran dry on the cursor; looking for another one.");
+        }
+        finally
+        {
+            if (altHeld) await ReleaseAlt();
         }
 
-        return Fail(OutOfOrbsMessage(orbToHold));
+        return results;
     }
 
     // ------------------------------------------------------------------ stash search
@@ -852,18 +940,19 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         return true;
     }
 
-    /// <summary>One pass over the maps that do not match the regex yet: scour if needed, then alch once.</summary>
+    private const int MaxMisses = 3;
+
+    /// <summary>
+    /// One pass over the maps that do not match the regex yet: one scour sweep over everything that is magic or
+    /// rare, then one alch sweep over everything that is normal. Maps whose click had no effect are retried in the
+    /// next pass; after <see cref="MaxMisses"/> misses in a row the run aborts with a diagnosis.
+    /// </summary>
     private async SyncTask<bool> RollPass(List<MapInfo> toRoll)
     {
-        foreach (var snapshot in toRoll)
+        var keys = new List<(int X, int Y)>();
+        foreach (var map in toRoll)
         {
-            if (_cancelRequested) return Fail(StashOpen ? "Stopped by hotkey." : "The stash was closed.");
-
-            var key = snapshot.Key;
-            var state = State(key);
-            var map = FindMap(key);
-            if (map == null || !NeedsRoll(map)) continue;
-
+            var state = State(map);
             if (state.Rolls >= Settings.MaxRollsPerMap.Value)
             {
                 state.GaveUp = true;
@@ -871,83 +960,133 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
                 continue;
             }
 
-            if (map.Rarity != ItemRarity.Normal)
+            keys.Add(map.Key);
+        }
+
+        if (keys.Count == 0) return true;
+
+        // 1. scour sweep
+        var maps = MapsByKey();
+        var toScour = keys
+            .Where(k => maps.TryGetValue(k, out var m) && m.Rarity != ItemRarity.Normal)
+            .Select(k => new SweepTarget(k, m => m.Rarity == ItemRarity.Normal))
+            .ToList();
+
+        if (toScour.Count > 0)
+        {
+            if (ReserveReached(Orb.Scouring))
             {
-                if (ReserveReached(Orb.Scouring))
-                {
-                    _status = ReserveMessage(Orb.Scouring);
-                    return false;
-                }
-
-                _status = $"Scouring {map.Name} (roll {state.Rolls + 1})";
-                if (!await ApplyOrb(Orb.Scouring, key, m => m.Rarity == ItemRarity.Normal))
-                {
-                    if (_aborted) return false;
-                    return Fail(Settings.UseAltScourSwap.Value
-                        ? $"Alt + click did not scour {map.Name}: either no Orb of Scouring is reachable (out of scours) or the Alt-swap does not work for you. Turn off 'Scour via Alt-swap' to click scour stacks directly."
-                        : $"The Orb of Scouring had no effect on {map.Name}.");
-                }
-
-                state.Scours++;
-                _usedScour++;
-            }
-
-            if (ReserveReached(Orb.Alchemy))
-            {
-                _status = ReserveMessage(Orb.Alchemy);
+                _status = ReserveMessage(Orb.Scouring);
                 return false;
             }
 
-            _status = $"Alching {map.Name} (roll {state.Rolls + 1})";
-            if (!await ApplyOrb(Orb.Alchemy, key, m => m.Rarity == ItemRarity.Rare))
+            var scoured = await Sweep(Orb.Scouring, toScour, "Scouring");
+            if (scoured == null) return false;
+
+            foreach (var (key, changed) in scoured)
             {
-                if (_aborted) return false;
-                return Fail($"The Orb of Alchemy had no effect on {map.Name}.");
+                var state = State(key);
+                if (changed)
+                {
+                    state.Misses = 0;
+                    state.Scours++;
+                    _usedScour++;
+                    continue;
+                }
+
+                if (++state.Misses < MaxMisses) continue;
+                var name = maps.TryGetValue(key, out var m) ? m.Name : "a map";
+                return Fail(Settings.UseAltScourSwap.Value
+                    ? $"Alt + click did not scour {name} {MaxMisses} times: either no Orb of Scouring is reachable (out of scours) or the Alt-swap does not work for you. Turn off 'Scour via Alt-swap' to click scour stacks directly."
+                    : $"The Orb of Scouring had no effect on {name} {MaxMisses} times.");
             }
 
-            state.Rolls++;
-            state.ExaltDone = false;
-            _usedAlch++;
-
             if (_actions >= Settings.MaxActionsPerRun.Value) return true;
+        }
+
+        // 2. alch sweep over everything that is normal now
+        maps = MapsByKey();
+        var toAlch = keys
+            .Where(k => maps.TryGetValue(k, out var m) && m.Rarity == ItemRarity.Normal)
+            .Select(k => new SweepTarget(k, m => m.Rarity == ItemRarity.Rare))
+            .ToList();
+
+        if (toAlch.Count == 0) return true;
+
+        if (ReserveReached(Orb.Alchemy))
+        {
+            _status = ReserveMessage(Orb.Alchemy);
+            return false;
+        }
+
+        var alched = await Sweep(Orb.Alchemy, toAlch, "Alching");
+        if (alched == null) return false;
+
+        foreach (var (key, changed) in alched)
+        {
+            var state = State(key);
+            if (changed)
+            {
+                state.Misses = 0;
+                state.Rolls++;
+                state.ExaltDone = false;
+                _usedAlch++;
+                continue;
+            }
+
+            if (++state.Misses < MaxMisses) continue;
+            var name = maps.TryGetValue(key, out var m) ? m.Name : "a map";
+            return Fail($"The Orb of Alchemy had no effect on {name} {MaxMisses} times.");
         }
 
         return true;
     }
 
-    /// <summary>One pass over the highlighted maps that still have open mods: one exalt each.</summary>
+    /// <summary>One exalt sweep over the highlighted maps that still have open mods.</summary>
     private async SyncTask<bool> ExaltPass(List<MapInfo> toExalt)
     {
+        var maps = MapsByKey();
+        var targets = new List<SweepTarget>();
         foreach (var snapshot in toExalt)
         {
-            if (_cancelRequested) return Fail(StashOpen ? "Stopped by hotkey." : "The stash was closed.");
-
-            var key = snapshot.Key;
-            var state = State(key);
-            var map = FindMap(key);
-            if (map == null || !NeedsExalt(map)) continue;
-
-            if (ReserveReached(Orb.Exalted))
-            {
-                _status = ReserveMessage(Orb.Exalted);
-                return false;
-            }
-
+            if (!maps.TryGetValue(snapshot.Key, out var map) || !NeedsExalt(map)) continue;
             var modsBefore = map.ExplicitMods;
-            _status = $"Exalting {map.Name} ({modsBefore} -> {modsBefore + 1} mods)";
-            if (!await ApplyOrb(Orb.Exalted, key, m => m.ExplicitMods != modsBefore || m.Rarity != ItemRarity.Rare))
+            targets.Add(new SweepTarget(map.Key, m => m.ExplicitMods != modsBefore || m.Rarity != ItemRarity.Rare));
+        }
+
+        if (targets.Count == 0) return true;
+
+        if (ReserveReached(Orb.Exalted))
+        {
+            _status = ReserveMessage(Orb.Exalted);
+            return false;
+        }
+
+        var results = await Sweep(Orb.Exalted, targets, "Exalting");
+        if (results == null) return false;
+
+        var after = MapsByKey();
+        foreach (var (key, changed) in results)
+        {
+            var state = State(key);
+            if (!changed)
             {
-                if (_aborted) return false;
-                state.ExaltDone = true;
-                state.Note = $"exalt had no effect at {modsBefore} mods (no open affix)";
+                // a rare map below 6 mods always has an open affix, so a miss is most likely a click that did
+                // not register; give it another pass before treating the map as finished
+                if (++state.Misses >= 2)
+                {
+                    state.ExaltDone = true;
+                    state.Note = "exalt had no effect twice (no open affix?)";
+                }
+
                 continue;
             }
 
+            state.Misses = 0;
             state.Exalts++;
             _usedExalt++;
 
-            var after = FindMap(key);
-            if (after != null && !after.Highlighted)
+            if (after.TryGetValue(key, out var map) && !map.Highlighted)
             {
                 state.Bricks++;
                 if (state.Bricks > Settings.MaxBricksPerMap.Value)
@@ -960,8 +1099,6 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
                     state.Note = $"bricked by an exalt ({state.Bricks}), rerolling";
                 }
             }
-
-            if (_actions >= Settings.MaxActionsPerRun.Value) return true;
         }
 
         return true;

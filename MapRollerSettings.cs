@@ -57,13 +57,13 @@ public class MapRollerSettings : ISettings
     [Menu("Max orbs used per run", "Safety cap on the total number of orbs one run may consume.")]
     public RangeNode<int> MaxActionsPerRun { get; set; } = new(1000, 1, 20000);
 
-    [Menu("Click delay (ms)", "Pause after moving the mouse before clicking, and between key presses. 30-50 is fine on a stable connection.")]
+    [Menu("Click delay (ms)", "Pause after moving the mouse onto a map before clicking it, and between key presses. This is the main per-map cost now that clicks are batched; 15-25 works on most setups.")]
     public RangeNode<int> ClickDelay { get; set; } = new(40, 10, 1000);
 
-    [Menu("Item change timeout (ms)", "How long to wait for a map to change after an orb was used before treating it as failed.")]
+    [Menu("Item change timeout (ms)", "After a sweep, how long to wait for the clicked maps to change (plus 25 ms per map) before the unchanged ones are retried in the next pass.")]
     public RangeNode<int> ChangeTimeout { get; set; } = new(1500, 200, 10000);
 
-    [Menu("Highlight settle delay (ms)", "Pause after a map changed before trusting the search highlight. Raise it if finished maps get rolled again.")]
+    [Menu("Highlight settle delay (ms)", "Pause once per sweep after the maps changed before trusting the search highlight. Raise it if finished maps get rolled again.")]
     public RangeNode<int> HighlightSettleDelay { get; set; } = new(50, 0, 2000);
 
     [Menu("Delay after pasting the regex (ms)")]

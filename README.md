@@ -8,10 +8,10 @@ Rolls every map in the currently visible stash tab until the in-game stash searc
 2. The plugin pastes your regex into the stash search box (`Ctrl+F`, `Ctrl+A`, `Ctrl+V`, `Enter`) and restores your clipboard afterwards.
 3. **Rolling phase.** Every map that is not highlighted (or that is not rare yet) gets rolled:
    - It right-clicks an Orb of Alchemy stack so the orb sits on the cursor.
-   - Magic / rare maps are scoured first with `Shift + Alt + Left click` (the in-game Alt-swap turns the held Alchemy into a Scouring).
-   - Normal maps are alched with `Shift + Left click`. Shift keeps the orb on the cursor so it does not have to be picked up again.
+   - Clicks are batched: one sweep scours every magic / rare map with `Shift + Alt + Left click` (the in-game Alt-swap turns the held Alchemy into a Scouring), then one sweep alches every normal map. The plugin does not wait for the server between maps; it waits once per sweep for all clicked maps to change, so the round-trip is paid per sweep, not per map.
+   - Shift stays held so the orb stays on the cursor. When the held stack runs dry the sweep stops, lets the pending clicks land, picks up the next stack and continues. A map whose click had no effect is retried in the next pass; three misses in a row abort the run with a diagnosis.
    - This repeats until every rollable map is rare **and** highlighted by the search, or a map hits `Max alchemy rolls per map`.
-4. **Exalt phase** (optional). Each highlighted rare map with fewer explicit mods than `Target explicit mod count` gets one Exalted Orb per pass. If a map stops being highlighted after an exalt it is scoured and rerolled in the next rolling pass (up to `Max rerolls after an exalt brick` times). If an exalt has no effect (no open affix) the map is treated as finished.
+4. **Exalt phase** (optional). One sweep puts one Exalted Orb on each highlighted rare map with fewer explicit mods than `Target explicit mod count`. If a map stops being highlighted after an exalt it is scoured and rerolled in the next rolling pass (up to `Max rerolls after an exalt brick` times). If an exalt has no effect twice the map is treated as finished.
 5. The run ends when all maps are done, when the currency runs out (respecting the reserves), when the hotkey is pressed again, or when the stash is closed. The cursor is cleared (Escape cancels the held orb) and the mouse returns to where it was.
 
 Currency is read live from the visible stash tab and, optionally, from your inventory. The overlay next to the stash shows the phase, maps done, and how many Alchemy / Scouring / Exalted Orbs were used and are still left. Frames around maps: green = done, yellow = waiting for exalts, orange = still needs rolling, red = given up, grey = cannot be rolled (unique, corrupted or unidentified).
@@ -44,7 +44,7 @@ $env:exapiPackage = "C:\path\to\ExileApi"; dotnet build -c Release
 | Tab switch delay (ms) | Pause after a tab switch so the items can load. |
 | Keep at least N ... | Reserves. With a reserve set, the run stops once the orbs the plugin can count (visible tab, inventory, configured currency tab) drop to it. At 0 (default) counts never stop the run. |
 | Max orbs used per run | Safety cap on the total number of orbs one run may consume. |
-| Click delay / Item change timeout / Highlight settle delay / Delay after pasting the regex | Timing. Raise them if the game lags and actions get skipped. |
+| Click delay / Item change timeout / Highlight settle delay / Delay after pasting the regex | Timing. Click delay is the main per-map cost (15-25 ms works on most setups); the other two are paid once per sweep. Raise them if the game lags and clicks get skipped. |
 
 ## Notes and limits
 
