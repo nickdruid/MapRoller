@@ -93,6 +93,32 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         return true;
     }
 
+    /// <summary>
+    /// Set when the HUD unloads the plugin (hot reload, disable, shutdown). Every wait loop checks it so a running
+    /// task winds down within a frame instead of living on in the HUD's frame queue and pinning the old assembly.
+    /// </summary>
+    private bool _shutdown;
+
+    public override void OnPluginDestroyForHotReload() => Shutdown();
+
+    public override void OnClose() => Shutdown();
+
+    public override void OnUnload() => Shutdown();
+
+    private void Shutdown()
+    {
+        _shutdown = true;
+        _cancelRequested = true;
+        try
+        {
+            ReleaseModifierKeys();
+        }
+        catch
+        {
+            // best effort while the HUD tears the plugin down
+        }
+    }
+
     public override Job Tick()
     {
         if (Settings.RunHotkey.PressedOnce())
@@ -386,7 +412,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
     private async SyncTask<bool> Wait(int milliseconds)
     {
         var stopwatch = Stopwatch.StartNew();
-        while (stopwatch.ElapsedMilliseconds < milliseconds)
+        while (stopwatch.ElapsedMilliseconds < milliseconds && !_shutdown)
         {
             await TaskUtils.NextFrame();
         }
@@ -397,7 +423,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
     private async SyncTask<bool> WaitUntil(Func<bool> condition, int timeoutMilliseconds)
     {
         var stopwatch = Stopwatch.StartNew();
-        while (stopwatch.ElapsedMilliseconds < timeoutMilliseconds)
+        while (stopwatch.ElapsedMilliseconds < timeoutMilliseconds && !_shutdown)
         {
             if (SafeCheck(condition)) return true;
             await TaskUtils.NextFrame();
@@ -1109,7 +1135,8 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         try
         {
             ReleaseModifierKeys();
-            if (GameFocused())
+            // during a HUD unload only let go of the keys; no Escape, tab switches or mouse moves in the game
+            if (!_shutdown && GameFocused())
             {
                 await ReleaseCursor();
                 if (StashPanelVisible && _mapTabIndex >= 0 && CurrentTabIndex != _mapTabIndex)

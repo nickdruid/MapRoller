@@ -22,6 +22,8 @@ Easiest: open the PluginUpdater plugin in the HUD, go to its **Add** tab and pas
 
 Manual: copy this folder to `<ExileApi>/Plugins/Source/MapRoller`. Either way the HUD compiles plugins in `Plugins/Source` when it starts (it sets `exapiPackage` itself). Enable **MapRoller** in the plugin list, set the regex and the hotkey.
 
+**Updating without restarting the HUD:** by default the HUD keeps every loaded plugin DLL locked, so a plugin whose source changed fails to rebuild on "Reload plugins" with `MSB3027 ... The file is locked by: Loader`. Turn on **Avoid locking DLL files** in the HUD settings (Core, Plugins section) and the HUD loads plugins from memory instead; updates then rebuild and reload in place. Without that option, restart the HUD after an update. Plugins that did not change are unaffected either way, because their build skips the copy.
+
 To build by hand, point `exapiPackage` at your ExileApi folder:
 
 ```powershell
