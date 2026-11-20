@@ -20,12 +20,12 @@ using Vector2Num = System.Numerics.Vector2;
 namespace MapRoller;
 
 /// <summary>
-/// Rolls every map in the visible stash tab with Orbs of Alchemy / Scouring until the in-game
+/// Rolls every map in the visible stash tab with Orbs of Alchemy / Scouring (or Chaos Orbs) until the in-game
 /// stash search (regex) highlights all of them, then fills open mods with Exalted Orbs.
 /// </summary>
 public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
 {
-    private enum Orb { Alchemy, Scouring, Exalted }
+    private enum Orb { Alchemy, Scouring, Chaos, Exalted }
     private enum Phase { Idle, Preparing, Rolling, Exalting, Finished, Aborted }
 
     private const string MapPathPrefix = "Metadata/Items/Maps/";
@@ -34,6 +34,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
     {
         [Orb.Alchemy] = ("Metadata/Items/Currency/CurrencyUpgradeToRare", "Orb of Alchemy"),
         [Orb.Scouring] = ("Metadata/Items/Currency/CurrencyConvertToNormal", "Orb of Scouring"),
+        [Orb.Chaos] = ("Metadata/Items/Currency/CurrencyRerollRare", "Chaos Orb"),
         [Orb.Exalted] = ("Metadata/Items/Currency/CurrencyAddModToRare", "Exalted Orb"),
     };
 
@@ -57,6 +58,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         string Name,
         ItemRarity Rarity,
         int ExplicitMods,
+        string ModSignature,
         bool Highlighted,
         bool Identified,
         bool Corrupted)
@@ -71,7 +73,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
     private Phase _phase = Phase.Idle;
     private string _status = "Idle";
     private readonly Stopwatch _runTimer = new();
-    private int _usedAlch, _usedScour, _usedExalt, _actions;
+    private int _usedAlch, _usedScour, _usedChaos, _usedExalt, _actions;
     private Orb? _held;
     private Vector2Num _savedMouse;
     private string _savedClipboard;
@@ -257,6 +259,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
                 baseComponent?.Name ?? entity.Path.Substring(MapPathPrefix.Length),
                 mods?.ItemRarity ?? ItemRarity.Normal,
                 mods?.ExplicitMods?.Count ?? 0,
+                ModSignature(mods),
                 element.isHighlighted,
                 mods?.Identified ?? true,
                 baseComponent?.isCorrupted ?? false));
@@ -265,6 +268,14 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         // grid order: top row first, left to right (the HUD returns items in memory order)
         result.Sort((a, b) => a.Key.Y != b.Key.Y ? a.Key.Y.CompareTo(b.Key.Y) : a.Key.X.CompareTo(b.Key.X));
         return result;
+    }
+
+    /// <summary>Explicit mods and their rolled values as one string, so a Chaos Orb reroll shows up even when the mod count stays the same.</summary>
+    private static string ModSignature(Mods mods)
+    {
+        var explicitMods = mods?.ExplicitMods;
+        if (explicitMods == null || explicitMods.Count == 0) return "";
+        return string.Join("|", explicitMods.Select(m => m.RawName + ":" + string.Join(",", m.Values ?? new List<int>())));
     }
 
     private MapInfo FindMap((int X, int Y) key)
@@ -357,6 +368,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
     {
         Orb.Alchemy => Settings.AlchemyReserve.Value,
         Orb.Scouring => Settings.ScouringReserve.Value,
+        Orb.Chaos => Settings.ChaosReserve.Value,
         _ => Settings.ExaltReserve.Value,
     };
 
@@ -868,7 +880,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         _states.Clear();
         _aborted = false;
         _held = null;
-        _usedAlch = _usedScour = _usedExalt = _actions = 0;
+        _usedAlch = _usedScour = _usedChaos = _usedExalt = _actions = 0;
         _runTimer.Restart();
         _savedMouse = Input.ForceMousePositionNum;
         _savedClipboard = null;
@@ -960,21 +972,27 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         var final = ScanMaps();
         var done = final.Count(IsDone);
         var gaveUp = final.Count(m => m.Rollable && State(m).GaveUp);
+        var used = Settings.UseChaosOrbs.Value
+            ? $"{_usedChaos} chaos, {_usedAlch} alch, {_usedScour} scour, {_usedExalt} exalt"
+            : $"{_usedAlch} alch, {_usedScour} scour, {_usedExalt} exalt";
         _status = gaveUp == 0
-            ? $"Done: {done} maps rolled ({_usedAlch} alch, {_usedScour} scour, {_usedExalt} exalt)."
-            : $"Done: {done} maps rolled, {gaveUp} given up ({_usedAlch} alch, {_usedScour} scour, {_usedExalt} exalt).";
+            ? $"Done: {done} maps rolled ({used})."
+            : $"Done: {done} maps rolled, {gaveUp} given up ({used}).";
         return true;
     }
 
     private const int MaxMisses = 3;
 
     /// <summary>
-    /// One pass over the maps that do not match the regex yet: one scour sweep over everything that is magic or
-    /// rare, then one alch sweep over everything that is normal. Maps whose click had no effect are retried in the
-    /// next pass; after <see cref="MaxMisses"/> misses in a row the run aborts with a diagnosis.
+    /// One pass over the maps that do not match the regex yet. Alch + Scour mode: one scour sweep over everything
+    /// that is magic or rare, then one alch sweep over everything that is normal. Chaos mode: one scour sweep over
+    /// magic maps only, one alch sweep over normal maps, then one chaos sweep over the rare maps. Maps whose click
+    /// had no effect are retried in the next pass; after <see cref="MaxMisses"/> misses in a row the run aborts with
+    /// a diagnosis.
     /// </summary>
     private async SyncTask<bool> RollPass(List<MapInfo> toRoll)
     {
+        var chaosMode = Settings.UseChaosOrbs.Value;
         var keys = new List<(int X, int Y)>();
         foreach (var map in toRoll)
         {
@@ -991,10 +1009,10 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
 
         if (keys.Count == 0) return true;
 
-        // 1. scour sweep
+        // 1. scour sweep (in chaos mode only magic maps need it; rare maps are rerolled in place)
         var maps = MapsByKey();
         var toScour = keys
-            .Where(k => maps.TryGetValue(k, out var m) && m.Rarity != ItemRarity.Normal)
+            .Where(k => maps.TryGetValue(k, out var m) && m.Rarity != ItemRarity.Normal && !(chaosMode && m.Rarity == ItemRarity.Rare))
             .Select(k => new SweepTarget(k, m => m.Rarity == ItemRarity.Normal))
             .ToList();
 
@@ -1037,18 +1055,63 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
             .Select(k => new SweepTarget(k, m => m.Rarity == ItemRarity.Rare))
             .ToList();
 
-        if (toAlch.Count == 0) return true;
-
-        if (ReserveReached(Orb.Alchemy))
+        if (toAlch.Count > 0)
         {
-            _status = ReserveMessage(Orb.Alchemy);
+            if (ReserveReached(Orb.Alchemy))
+            {
+                _status = ReserveMessage(Orb.Alchemy);
+                return false;
+            }
+
+            var alched = await Sweep(Orb.Alchemy, toAlch, "Alching");
+            if (alched == null) return false;
+
+            foreach (var (key, changed) in alched)
+            {
+                var state = State(key);
+                if (changed)
+                {
+                    state.Misses = 0;
+                    state.Rolls++;
+                    state.ExaltDone = false;
+                    _usedAlch++;
+                    continue;
+                }
+
+                if (++state.Misses < MaxMisses) continue;
+                var name = maps.TryGetValue(key, out var m) ? m.Name : "a map";
+                return Fail($"The Orb of Alchemy had no effect on {name} {MaxMisses} times.");
+            }
+
+            if (_actions >= Settings.MaxActionsPerRun.Value) return true;
+        }
+
+        if (!chaosMode) return true;
+
+        // 3. chaos sweep over the rare maps that still do not match (only the ones that were rare before this
+        //    pass; a map that was just alched gets its highlight checked in the next pass first)
+        maps = MapsByKey();
+        var toChaos = new List<SweepTarget>();
+        foreach (var key in keys)
+        {
+            if (!maps.TryGetValue(key, out var map) || map.Rarity != ItemRarity.Rare || map.Highlighted) continue;
+            if (toAlch.Any(t => t.Key == key)) continue;
+            var before = map.ModSignature;
+            toChaos.Add(new SweepTarget(key, m => m.ModSignature != before || m.Rarity != ItemRarity.Rare));
+        }
+
+        if (toChaos.Count == 0) return true;
+
+        if (ReserveReached(Orb.Chaos))
+        {
+            _status = ReserveMessage(Orb.Chaos);
             return false;
         }
 
-        var alched = await Sweep(Orb.Alchemy, toAlch, "Alching");
-        if (alched == null) return false;
+        var chaosed = await Sweep(Orb.Chaos, toChaos, "Chaosing");
+        if (chaosed == null) return false;
 
-        foreach (var (key, changed) in alched)
+        foreach (var (key, changed) in chaosed)
         {
             var state = State(key);
             if (changed)
@@ -1056,13 +1119,13 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
                 state.Misses = 0;
                 state.Rolls++;
                 state.ExaltDone = false;
-                _usedAlch++;
+                _usedChaos++;
                 continue;
             }
 
             if (++state.Misses < MaxMisses) continue;
             var name = maps.TryGetValue(key, out var m) ? m.Name : "a map";
-            return Fail($"The Orb of Alchemy had no effect on {name} {MaxMisses} times.");
+            return Fail($"The Chaos Orb had no effect on {name} {MaxMisses} times.");
         }
 
         return true;
@@ -1076,8 +1139,8 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         foreach (var snapshot in toExalt)
         {
             if (!maps.TryGetValue(snapshot.Key, out var map) || !NeedsExalt(map)) continue;
-            var modsBefore = map.ExplicitMods;
-            targets.Add(new SweepTarget(map.Key, m => m.ExplicitMods != modsBefore || m.Rarity != ItemRarity.Rare));
+            var modsBefore = map.ModSignature;
+            targets.Add(new SweepTarget(map.Key, m => m.ModSignature != modsBefore || m.Rarity != ItemRarity.Rare));
         }
 
         if (targets.Count == 0) return true;
@@ -1203,10 +1266,11 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         {
             $"MapRoller  [{_phase}]  {_runTimer.Elapsed:mm\\:ss}",
             summary,
-            $"Alchemy   used {_usedAlch,4}   seen {CountOrbs(Orb.Alchemy),5}",
-            $"Scouring  used {_usedScour,4}   seen {CountOrbs(Orb.Scouring),5}",
-            $"Exalted   used {_usedExalt,4}   seen {CountOrbs(Orb.Exalted),5}",
         };
+        if (Settings.UseChaosOrbs.Value) lines.Add($"Chaos     used {_usedChaos,4}   seen {CountOrbs(Orb.Chaos),5}");
+        lines.Add($"Alchemy   used {_usedAlch,4}   seen {CountOrbs(Orb.Alchemy),5}");
+        lines.Add($"Scouring  used {_usedScour,4}   seen {CountOrbs(Orb.Scouring),5}");
+        lines.Add($"Exalted   used {_usedExalt,4}   seen {CountOrbs(Orb.Exalted),5}");
         if (CurrencyTabMode)
         {
             var tabIndex = ResolveCurrencyTabIndex();

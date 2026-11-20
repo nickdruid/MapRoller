@@ -10,11 +10,12 @@ Rolls every map in the currently visible stash tab until the in-game stash searc
    - It right-clicks an Orb of Alchemy stack so the orb sits on the cursor.
    - Clicks are batched: one sweep scours every magic / rare map with `Shift + Alt + Left click` (the in-game Alt-swap turns the held Alchemy into a Scouring), then one sweep alches every normal map. The plugin does not wait for the server between maps; it waits once per sweep for all clicked maps to change, so the round-trip is paid per sweep, not per map.
    - Shift stays held so the orb stays on the cursor. When the held stack runs dry the sweep stops, lets the pending clicks land, picks up the next stack and continues. A map whose click had no effect is retried in the next pass; three misses in a row abort the run with a diagnosis.
-   - This repeats until every rollable map is rare **and** highlighted by the search, or a map hits `Max alchemy rolls per map`.
+   - **Chaos mode** (`Roll with Chaos Orbs`): rare maps that do not match are rerolled in place with one Chaos Orb sweep instead of scour + alch. Normal maps are still alched first and magic maps are scoured, then alched. A map that was alched in the same pass gets its highlight checked before it is chaosed.
+   - This repeats until every rollable map is rare **and** highlighted by the search, or a map hits `Max rolls per map`.
 4. **Exalt phase** (optional). One sweep puts one Exalted Orb on each highlighted rare map with fewer explicit mods than `Target explicit mod count`. If a map stops being highlighted after an exalt it is scoured and rerolled in the next rolling pass (up to `Max rerolls after an exalt brick` times). If an exalt has no effect twice the map is treated as finished.
 5. The run ends when all maps are done, when the currency runs out (respecting the reserves), when the hotkey is pressed again, or when the stash is closed. The cursor is cleared (Escape cancels the held orb) and the mouse returns to where it was.
 
-Currency is read live from the visible stash tab and, optionally, from your inventory. The overlay next to the stash shows the phase, maps done, and how many Alchemy / Scouring / Exalted Orbs were used and are still left. Frames around maps: green = done, yellow = waiting for exalts, orange = still needs rolling, red = given up, grey = cannot be rolled (unique, corrupted or unidentified).
+Currency is read live from the visible stash tab and, optionally, from your inventory. The overlay next to the stash shows the phase, maps done, and how many Alchemy / Scouring / Chaos / Exalted Orbs were used and are still left. Frames around maps: green = done, yellow = waiting for exalts, orange = still needs rolling, red = given up, grey = cannot be rolled (unique, corrupted or unidentified).
 
 ## Install
 
@@ -37,9 +38,10 @@ $env:exapiPackage = "C:\path\to\ExileApi"; dotnet build -c Release
 | Start / Stop hotkey | Starts a run while the stash is open; pressing it again stops the run. |
 | Map regex | The text pasted into the stash search. A map counts as good once the game highlights it. Keep it under the search box limit (about 250 characters) or the game truncates it. |
 | Paste regex into stash search | Turn off to type the search yourself before pressing the hotkey. |
+| Roll with Chaos Orbs | On: rare maps that do not match are rerolled with Chaos Orbs (normal maps are alched first, magic maps scoured then alched). Off (default): every non-matching map is scoured and alched again. |
 | Scour via Alt-swap | Hold Alt while clicking with an Orb of Alchemy to use an Orb of Scouring instead. Turn off and the plugin picks up Orbs of Scouring as their own stack. |
 | Exalt highlighted maps / Target explicit mod count | Exalt phase on/off and how many explicit mods to aim for (max 6). |
-| Max alchemy rolls per map | Give up on a map after this many alchs. Maps the regex can never match (wrong tier, wrong name) burn this many orbs, so keep the tab clean. |
+| Max rolls per map | Give up on a map after this many alchs (or chaos orbs in chaos mode). Maps the regex can never match (wrong tier, wrong name) burn this many orbs, so keep the tab clean. |
 | Max rerolls after an exalt brick | How often a map may be scoured and rerolled because an exalt broke the regex match. |
 | Use currency from player inventory | Also count and click orb stacks in your inventory. |
 | Take orbs from a separate currency tab / Currency tab | When an orb is not in the map tab or your inventory, the plugin switches to the selected tab with the Left/Right arrow keys, right-clicks the stack, and switches back. The dropdown fills with your stash tabs while the stash is open. Orbs in the map tab or inventory are used first. |

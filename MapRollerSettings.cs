@@ -18,6 +18,9 @@ public class MapRollerSettings : ISettings
     [Menu("Paste regex into stash search", "Turn off if you prefer to type the search yourself before pressing the hotkey.")]
     public ToggleNode ApplyRegexToSearch { get; set; } = new(true);
 
+    [Menu("Roll with Chaos Orbs", "On: rare maps that do not match the regex are rerolled in place with Chaos Orbs; normal maps are alched first and magic maps are scoured, then alched. Off: every non-matching map is scoured and alched again.")]
+    public ToggleNode UseChaosOrbs { get; set; } = new(false);
+
     [Menu("Scour via Alt-swap", "Hold Alt while clicking with an Orb of Alchemy to use an Orb of Scouring instead (in-game feature). Turn off to pick up Orbs of Scouring as their own stack.")]
     public ToggleNode UseAltScourSwap { get; set; } = new(true);
 
@@ -27,7 +30,7 @@ public class MapRollerSettings : ISettings
     [Menu("Target explicit mod count", "Exalt until the map has this many explicit mods (a rare map holds at most 6).")]
     public RangeNode<int> TargetModCount { get; set; } = new(6, 1, 6);
 
-    [Menu("Max alchemy rolls per map", "Give up on a map after this many Orbs of Alchemy.")]
+    [Menu("Max rolls per map", "Give up on a map after this many rolls (Orbs of Alchemy, or Chaos Orbs in chaos mode).")]
     public RangeNode<int> MaxRollsPerMap { get; set; } = new(30, 1, 500);
 
     [Menu("Max rerolls after an exalt brick", "How often a map may be scoured and rerolled because an exalt made it stop matching the regex.")]
@@ -50,6 +53,9 @@ public class MapRollerSettings : ISettings
 
     [Menu("Keep at least N Orbs of Scouring")]
     public RangeNode<int> ScouringReserve { get; set; } = new(0, 0, 5000);
+
+    [Menu("Keep at least N Chaos Orbs")]
+    public RangeNode<int> ChaosReserve { get; set; } = new(0, 0, 5000);
 
     [Menu("Keep at least N Exalted Orbs")]
     public RangeNode<int> ExaltReserve { get; set; } = new(0, 0, 5000);
