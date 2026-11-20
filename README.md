@@ -18,7 +18,9 @@ Currency is read live from the visible stash tab and, optionally, from your inve
 
 ## Install
 
-Copy this folder to `<ExileApi>/Plugins/Source/MapRoller`. The HUD compiles plugins in `Plugins/Source` when it starts (it sets `exapiPackage` itself). Enable **MapRoller** in the plugin list, set the regex and the hotkey.
+Easiest: open the PluginUpdater plugin in the HUD, go to its **Add** tab and paste `https://github.com/nickdruid/MapRoller`. It clones the repo into `Plugins/Source/MapRoller` and keeps it updated.
+
+Manual: copy this folder to `<ExileApi>/Plugins/Source/MapRoller`. Either way the HUD compiles plugins in `Plugins/Source` when it starts (it sets `exapiPackage` itself). Enable **MapRoller** in the plugin list, set the regex and the hotkey.
 
 To build by hand, point `exapiPackage` at your ExileApi folder:
 
