@@ -36,6 +36,15 @@ public class MapRollerSettings : ISettings
     [Menu("Use currency from player inventory", "Also count and click Alchemy / Scouring / Exalted stacks in your inventory, not only the visible stash tab.")]
     public ToggleNode UseInventoryCurrency { get; set; } = new(true);
 
+    [Menu("Take orbs from a separate currency tab", "When an orb is not in the map tab or your inventory, switch to the selected currency tab, pick it up, and switch back. Uses the Left/Right arrow keys, the default PoE binding for stash tabs.")]
+    public ToggleNode UseCurrencyTab { get; set; } = new(false);
+
+    [Menu("Currency tab", "Filled with your stash tabs while the stash is open.")]
+    public ListNode CurrencyTab { get; set; } = new() { Value = "" };
+
+    [Menu("Tab switch delay (ms)", "Pause after switching stash tabs so the items can load.")]
+    public RangeNode<int> TabSwitchDelay { get; set; } = new(350, 50, 3000);
+
     [Menu("Keep at least N Orbs of Alchemy", "The run stops before the remaining amount drops below this.")]
     public RangeNode<int> AlchemyReserve { get; set; } = new(0, 0, 5000);
 

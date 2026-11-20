@@ -40,6 +40,8 @@ $env:exapiPackage = "C:\path\to\ExileApi"; dotnet build -c Release
 | Max alchemy rolls per map | Give up on a map after this many alchs. Maps the regex can never match (wrong tier, wrong name) burn this many orbs, so keep the tab clean. |
 | Max rerolls after an exalt brick | How often a map may be scoured and rerolled because an exalt broke the regex match. |
 | Use currency from player inventory | Also count and click orb stacks in your inventory. |
+| Take orbs from a separate currency tab / Currency tab | When an orb is not in the map tab or your inventory, the plugin switches to the selected tab with the Left/Right arrow keys, right-clicks the stack, and switches back. The dropdown fills with your stash tabs while the stash is open. Orbs in the map tab or inventory are used first. |
+| Tab switch delay (ms) | Pause after a tab switch so the items can load. |
 | Keep at least N ... | Reserves. The run stops before the remaining amount of that orb drops below the reserve. |
 | Max orbs used per run | Safety cap on the total number of orbs one run may consume. |
 | Click delay / Item change timeout / Highlight settle delay / Delay after pasting the regex | Timing. Raise them if the game lags and actions get skipped. |
@@ -50,4 +52,5 @@ $env:exapiPackage = "C:\path\to\ExileApi"; dotnet build -c Release
 - Unique, corrupted and unidentified maps are skipped.
 - A map that is already rare and highlighted is left alone, so you can rerun on a half-finished tab.
 - Only the visible stash tab is processed. For a map stash tab, the currently selected sub-tab is used.
+- With a currency tab configured, the orb counts for that tab are a snapshot taken on each visit and kept in step by the plugin between visits. Counts for the map tab and inventory are always live.
 - If "Alt + click did not scour" shows up, the Alt-swap did not work for your client or no Orb of Scouring was reachable. Turn off **Scour via Alt-swap** to click scour stacks directly.

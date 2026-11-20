@@ -73,6 +73,13 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
     private Vector2Num _savedMouse;
     private string _savedClipboard;
 
+    // currency tab support
+    private readonly List<string> _tabLabels = new();
+    private string _tabLabelsKey = "";
+    private int _mapTabIndex = -1;
+    private readonly Dictionary<Orb, int> _currencyTabCounts = new();
+    private bool _currencyTabCounted;
+
     // ------------------------------------------------------------------ plugin lifecycle
 
     public override bool Initialise()
@@ -105,16 +112,57 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
 
         if (_run != null)
         {
-            if (!StashOpen) _cancelRequested = true;
+            if (!StashPanelVisible) _cancelRequested = true;
             TaskUtils.RunOrRestart(ref _run, () => null);
         }
-        else if (!StashOpen && _phase != Phase.Idle)
+        else if (!StashPanelVisible && _phase != Phase.Idle)
         {
             _phase = Phase.Idle;
         }
 
+        if (StashPanelVisible) RefreshTabList();
+
         return null;
     }
+
+    /// <summary>Feeds the player's stash tab names into the "Currency tab" dropdown while the stash is open.</summary>
+    private void RefreshTabList()
+    {
+        try
+        {
+            var names = Stash.Inventories?.Select(x => x.TabName).ToList();
+            if (names == null || names.Count == 0) return;
+
+            var key = string.Join("\u0001", names);
+            if (key == _tabLabelsKey) return;
+            _tabLabelsKey = key;
+
+            _tabLabels.Clear();
+            var seen = new HashSet<string>();
+            for (var i = 0; i < names.Count; i++)
+            {
+                var label = string.IsNullOrWhiteSpace(names[i]) ? $"(tab {i + 1})" : names[i];
+                if (!seen.Add(label)) label = $"{label} ({i + 1})";
+                _tabLabels.Add(label);
+            }
+
+            Settings.CurrencyTab.SetListValues(new List<string>(_tabLabels));
+        }
+        catch
+        {
+            // stash data can be mid-update; try again next frame
+        }
+    }
+
+    private int ResolveCurrencyTabIndex()
+    {
+        var wanted = Settings.CurrencyTab.Value;
+        if (string.IsNullOrEmpty(wanted)) return -1;
+        return _tabLabels.IndexOf(wanted);
+    }
+
+    private bool CurrencyTabMode => Settings.UseCurrencyTab.Value;
+    private int CurrentTabIndex => Stash?.IndexVisibleStash ?? -1;
 
     public override void Render()
     {
@@ -138,7 +186,8 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
 
     private StashElement Stash => GameController.IngameState.IngameUi.StashElement;
     private Inventory VisibleStash => Stash?.VisibleStash;
-    private bool StashOpen => Stash is { IsVisible: true } && VisibleStash != null;
+    private bool StashPanelVisible => Stash is { IsVisible: true };
+    private bool StashOpen => StashPanelVisible && VisibleStash != null;
     private Vector2 WindowOffset => GameController.Window.GetWindowRectangle().TopLeft;
     private PoeCursor CursorElement => GameController.IngameState.IngameUi.Cursor;
 
@@ -246,9 +295,24 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         return element.Item.TryGetComponent<Stack>(out var stack) ? Math.Max(stack.Size, 1) : 1;
     }
 
+    /// <summary>Orbs reachable right now: visible tab + inventory, plus the last count seen in the currency tab (if that tab is not the visible one).</summary>
     private int CountOrbs(Orb orb)
     {
-        return OrbStacks(orb).Sum(StackSize);
+        var count = OrbStacks(orb).Sum(StackSize);
+        if (CurrencyTabMode && _currencyTabCounted && CurrentTabIndex != ResolveCurrencyTabIndex())
+        {
+            count += _currencyTabCounts.GetValueOrDefault(orb);
+        }
+
+        return count;
+    }
+
+    /// <summary>Called after an orb was consumed; keeps the currency tab snapshot in step until the next visit refreshes it.</summary>
+    private void NoteOrbConsumed(Orb orb)
+    {
+        if (!CurrencyTabMode || !_currencyTabCounted) return;
+        if (OrbStacks(orb).Count > 0) return; // it came from the visible tab or the inventory, which are counted live
+        if (_currencyTabCounts.TryGetValue(orb, out var left) && left > 0) _currencyTabCounts[orb] = left - 1;
     }
 
     private int Reserve(Orb orb) => orb switch
@@ -408,9 +472,25 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
             return Fail("Could not clear the cursor: Escape did not cancel the held orb.");
 
         var stack = OrbStacks(orb).OrderByDescending(StackSize).FirstOrDefault();
+        var switchedTab = false;
+
+        if (stack == null && CurrencyTabMode)
+        {
+            var tabIndex = ResolveCurrencyTabIndex();
+            if (tabIndex < 0) return Fail("Currency tab is enabled but no tab is selected in the settings.");
+
+            _status = $"Fetching {OrbIds[orb].Name} from the currency tab";
+            if (!await SwitchToTab(tabIndex)) return false;
+            switchedTab = true;
+            SnapshotCurrencyTab();
+            stack = OrbStacks(orb).OrderByDescending(StackSize).FirstOrDefault();
+        }
+
         if (stack == null)
         {
-            var where = Settings.UseInventoryCurrency.Value ? "the visible stash tab or your inventory" : "the visible stash tab";
+            var where = CurrencyTabMode
+                ? "the currency tab, the map tab or your inventory"
+                : Settings.UseInventoryCurrency.Value ? "the visible stash tab or your inventory" : "the visible stash tab";
             return Fail($"No {OrbIds[orb].Name} found in {where}.");
         }
 
@@ -426,7 +506,77 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         if (!Holding(orb))
             return Fail($"The cursor holds something other than {OrbIds[orb].Name}.");
 
+        if (switchedTab)
+        {
+            // the orb stays on the cursor while the tab changes; go back to the maps
+            if (!await SwitchToTab(_mapTabIndex)) return false;
+            if (!await WaitUntil(() => ScanMaps().Count > 0, Settings.ChangeTimeout.Value))
+                return Fail("The maps did not show up again after switching back to the map tab.");
+        }
+
         return true;
+    }
+
+    /// <summary>Records how many orbs of each kind sit in the currently visible tab (used while on the currency tab).</summary>
+    private void SnapshotCurrencyTab()
+    {
+        foreach (var orb in OrbIds.Keys)
+        {
+            _currencyTabCounts[orb] = OrbStacks(orb).Where(s => VisibleStashItems().Contains(s)).Sum(StackSize);
+        }
+
+        _currencyTabCounted = true;
+    }
+
+    /// <summary>Switches the stash to the given tab index with the arrow keys (the default PoE binding) and waits for it to load.</summary>
+    private async SyncTask<bool> SwitchToTab(int tabIndex)
+    {
+        if (tabIndex < 0) return Fail("No stash tab to switch to.");
+
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var current = CurrentTabIndex;
+            if (current == tabIndex) break;
+            if (!GameFocused()) return Fail("The game window is not in the foreground.");
+
+            var distance = tabIndex - current;
+            var key = distance < 0 ? Keys.Left : Keys.Right;
+            for (var i = 0; i < Math.Abs(distance); i++)
+            {
+                Input.KeyPressRelease(key);
+                await Wait(Math.Max(20, Settings.ClickDelay.Value / 2));
+            }
+
+            await WaitUntil(() => CurrentTabIndex == tabIndex, Settings.ChangeTimeout.Value);
+        }
+
+        if (CurrentTabIndex != tabIndex)
+            return Fail($"Could not switch to stash tab {tabIndex + 1} (now on {CurrentTabIndex + 1}). Is the stash search box still focused?");
+
+        await Wait(Settings.TabSwitchDelay.Value);
+        if (!await WaitUntil(() => VisibleStash?.VisibleInventoryItems != null, Settings.ChangeTimeout.Value))
+            return Fail($"Stash tab {tabIndex + 1} did not load its items.");
+
+        return true;
+    }
+
+    /// <summary>Visits the currency tab once to learn how many orbs it holds, then returns to the maps.</summary>
+    private async SyncTask<bool> RefreshCurrencyTabCounts()
+    {
+        var tabIndex = ResolveCurrencyTabIndex();
+        if (tabIndex < 0) return Fail("Currency tab is enabled but no tab is selected in the settings.");
+        if (tabIndex == _mapTabIndex)
+        {
+            _currencyTabCounted = false; // same tab: everything is counted live
+            return true;
+        }
+
+        _status = "Counting orbs in the currency tab";
+        if (!await SwitchToTab(tabIndex)) return false;
+        SnapshotCurrencyTab();
+        if (!await SwitchToTab(_mapTabIndex)) return false;
+        return await WaitUntil(() => ScanMaps().Count > 0, Settings.ChangeTimeout.Value)
+               || Fail("The maps did not show up again after switching back to the map tab.");
     }
 
     /// <summary>
@@ -451,6 +601,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         if (!applied) return false;
 
         _actions++;
+        NoteOrbConsumed(orb);
         await Wait(Settings.HighlightSettleDelay.Value);
         return true;
     }
@@ -523,6 +674,9 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         _runTimer.Restart();
         _savedMouse = Input.ForceMousePositionNum;
         _savedClipboard = null;
+        _mapTabIndex = CurrentTabIndex;
+        _currencyTabCounts.Clear();
+        _currencyTabCounted = false;
 
         try
         {
@@ -570,6 +724,8 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         var initial = ScanMaps();
         if (initial.Count == 0) return Fail("No maps in the visible stash tab.");
         if (!initial.Any(m => m.Rollable)) return Fail("Every map in this tab is unique, corrupted or unidentified.");
+
+        if (CurrencyTabMode && !await RefreshCurrencyTabCounts()) return false;
 
         foreach (var map in initial.Where(m => !m.Rollable))
         {
@@ -735,6 +891,15 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
             if (GameFocused())
             {
                 await ReleaseCursor();
+                if (StashPanelVisible && _mapTabIndex >= 0 && CurrentTabIndex != _mapTabIndex)
+                {
+                    var keepStatus = _status;
+                    var wasAborted = _aborted;
+                    await SwitchToTab(_mapTabIndex);
+                    _status = keepStatus;
+                    _aborted = wasAborted;
+                }
+
                 Input.SetCursorPos(_savedMouse);
                 Input.MouseMove();
             }
@@ -793,8 +958,16 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
             $"Alchemy   used {_usedAlch,4}   left {CountOrbs(Orb.Alchemy),5}",
             $"Scouring  used {_usedScour,4}   left {CountOrbs(Orb.Scouring),5}",
             $"Exalted   used {_usedExalt,4}   left {CountOrbs(Orb.Exalted),5}",
-            _status,
         };
+        if (CurrencyTabMode)
+        {
+            var tabIndex = ResolveCurrencyTabIndex();
+            lines.Add(tabIndex >= 0
+                ? $"Currency tab: {Settings.CurrencyTab.Value}" + (_currencyTabCounted ? "" : " (not counted yet)")
+                : "Currency tab: none selected!");
+        }
+
+        lines.Add(_status);
 
         var anchor = VisibleStash.InventoryUIElement?.GetClientRect() ?? Stash.GetClientRect();
         var position = new Vector2Num(anchor.Right + 12, anchor.Top);
