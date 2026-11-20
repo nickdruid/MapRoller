@@ -45,7 +45,7 @@ public class MapRollerSettings : ISettings
     [Menu("Tab switch delay (ms)", "Pause after switching stash tabs so the items can load.")]
     public RangeNode<int> TabSwitchDelay { get; set; } = new(350, 50, 3000);
 
-    [Menu("Keep at least N Orbs of Alchemy", "The run stops before the remaining amount drops below this.")]
+    [Menu("Keep at least N Orbs of Alchemy", "The run stops once the orbs the plugin can count (visible tab, inventory, configured currency tab) drop to this. 0 = never stop on counts; the run then goes on until the cursor really loses the orb.")]
     public RangeNode<int> AlchemyReserve { get; set; } = new(0, 0, 5000);
 
     [Menu("Keep at least N Orbs of Scouring")]

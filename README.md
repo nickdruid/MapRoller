@@ -42,7 +42,7 @@ $env:exapiPackage = "C:\path\to\ExileApi"; dotnet build -c Release
 | Use currency from player inventory | Also count and click orb stacks in your inventory. |
 | Take orbs from a separate currency tab / Currency tab | When an orb is not in the map tab or your inventory, the plugin switches to the selected tab with the Left/Right arrow keys, right-clicks the stack, and switches back. The dropdown fills with your stash tabs while the stash is open. Orbs in the map tab or inventory are used first. |
 | Tab switch delay (ms) | Pause after a tab switch so the items can load. |
-| Keep at least N ... | Reserves. The run stops before the remaining amount of that orb drops below the reserve. |
+| Keep at least N ... | Reserves. With a reserve set, the run stops once the orbs the plugin can count (visible tab, inventory, configured currency tab) drop to it. At 0 (default) counts never stop the run. |
 | Max orbs used per run | Safety cap on the total number of orbs one run may consume. |
 | Click delay / Item change timeout / Highlight settle delay / Delay after pasting the regex | Timing. Raise them if the game lags and actions get skipped. |
 
@@ -52,5 +52,5 @@ $env:exapiPackage = "C:\path\to\ExileApi"; dotnet build -c Release
 - Unique, corrupted and unidentified maps are skipped.
 - A map that is already rare and highlighted is left alone, so you can rerun on a half-finished tab.
 - Only the visible stash tab is processed. For a map stash tab, the currently selected sub-tab is used.
-- With a currency tab configured, the orb counts for that tab are a snapshot taken on each visit and kept in step by the plugin between visits. Counts for the map tab and inventory are always live.
+- "Out of orbs" is decided by the cursor, not by counts: while Shift is held the game keeps pulling orbs from stash tabs the plugin cannot see (for example a currency tab that is not selected as such). The run only stops when the cursor drops the orb and no stack can be found in the visible tab, the inventory or the configured currency tab. The "seen" numbers in the overlay are therefore only the orbs the plugin can count: visible tab, inventory, plus a snapshot of the configured currency tab taken on each visit.
 - If "Alt + click did not scour" shows up, the Alt-swap did not work for your client or no Orb of Scouring was reachable. Turn off **Scour via Alt-swap** to click scour stacks directly.

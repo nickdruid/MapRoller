@@ -324,15 +324,22 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         _ => Settings.ExaltReserve.Value,
     };
 
-    private bool HasSpare(Orb orb) => CountOrbs(orb) - Reserve(orb) >= 1;
+    /// <summary>
+    /// True when a reserve is configured and the orbs the plugin can count have dropped to it.
+    /// Without a reserve the counts never gate the run: while Shift is held the game pulls orbs from
+    /// stash tabs the plugin cannot see, so "out of orbs" is only decided when the cursor really loses the orb.
+    /// </summary>
+    private bool ReserveReached(Orb orb) => Reserve(orb) > 0 && CountOrbs(orb) - Reserve(orb) < 1;
+
+    private string ReserveMessage(Orb orb) =>
+        $"Stopped: {CountOrbs(orb)} {OrbIds[orb].Name}s counted, {Reserve(orb)} kept as reserve.";
 
     private string OutOfOrbsMessage(Orb orb)
     {
-        var reserve = Reserve(orb);
-        var left = CountOrbs(orb);
-        return reserve > 0
-            ? $"Out of {OrbIds[orb].Name}s: {left} left, {reserve} kept as reserve."
-            : $"Out of {OrbIds[orb].Name}s.";
+        var where = CurrencyTabMode
+            ? "the currency tab, the map tab or your inventory"
+            : Settings.UseInventoryCurrency.Value ? "the visible stash tab or your inventory" : "the visible stash tab";
+        return $"Out of {OrbIds[orb].Name}s: none left in {where}.";
     }
 
     private bool Holding(Orb orb)
@@ -544,13 +551,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
             stack = OrbStacks(orb).OrderByDescending(StackSize).FirstOrDefault();
         }
 
-        if (stack == null)
-        {
-            var where = CurrencyTabMode
-                ? "the currency tab, the map tab or your inventory"
-                : Settings.UseInventoryCurrency.Value ? "the visible stash tab or your inventory" : "the visible stash tab";
-            return Fail($"No {OrbIds[orb].Name} found in {where}.");
-        }
+        if (stack == null) return Fail(OutOfOrbsMessage(orb));
 
         if (!GameFocused()) return Fail("The game window is not in the foreground.");
 
@@ -647,23 +648,45 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         var useAlt = orb == Orb.Scouring && Settings.UseAltScourSwap.Value;
         var orbToHold = useAlt ? Orb.Alchemy : orb;
 
-        if (!await EnsureHolding(orbToHold)) return false;
+        // Two attempts: the held stack can run dry on the click itself. The game then drops the orb from the
+        // cursor (after pulling from every stack it can reach, including hidden tabs); a second EnsureHolding
+        // looks for another stack and only fails when there is none anywhere.
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            if (!await EnsureHolding(orbToHold)) return false;
 
-        var map = FindMap(key);
-        if (map == null) return Fail($"The map at {key.X},{key.Y} disappeared from the stash tab.");
-        if (!GameFocused()) return Fail("The game window is not in the foreground.");
+            var map = FindMap(key);
+            if (map == null) return Fail($"The map at {key.X},{key.Y} disappeared from the stash tab.");
+            if (!GameFocused()) return Fail("The game window is not in the foreground.");
 
-        await HoldShift();
-        await MoveTo(map.Element.GetClientRect());
-        await LeftClick(alt: useAlt);
+            await HoldShift();
+            await MoveTo(map.Element.GetClientRect());
+            await LeftClick(alt: useAlt);
 
-        var applied = await WaitUntil(() => FindMap(key) is { } m && changed(m), Settings.ChangeTimeout.Value);
-        if (!applied) return false;
+            bool Changed() => FindMap(key) is { } m && changed(m);
 
-        _actions++;
-        NoteOrbConsumed(orb);
-        await Wait(Settings.HighlightSettleDelay.Value);
-        return true;
+            await WaitUntil(() => Changed() || !CursorBusy(), Settings.ChangeTimeout.Value);
+            if (!Changed() && !CursorBusy())
+            {
+                // the cursor let go of the orb; give the server response a moment in case the map still changes
+                await WaitUntil(Changed, Math.Max(250, Settings.ClickDelay.Value * 4));
+            }
+
+            if (Changed())
+            {
+                _actions++;
+                NoteOrbConsumed(orb);
+                await Wait(Settings.HighlightSettleDelay.Value);
+                return true;
+            }
+
+            if (CursorBusy()) return false; // orb still on the cursor, the click just had no effect
+
+            _held = null;
+            Debug($"The {OrbIds[orbToHold].Name} stack ran dry on the cursor; looking for another one.");
+        }
+
+        return Fail(OutOfOrbsMessage(orbToHold));
     }
 
     // ------------------------------------------------------------------ stash search
@@ -850,9 +873,9 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
 
             if (map.Rarity != ItemRarity.Normal)
             {
-                if (!HasSpare(Orb.Scouring))
+                if (ReserveReached(Orb.Scouring))
                 {
-                    _status = OutOfOrbsMessage(Orb.Scouring);
+                    _status = ReserveMessage(Orb.Scouring);
                     return false;
                 }
 
@@ -861,7 +884,7 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
                 {
                     if (_aborted) return false;
                     return Fail(Settings.UseAltScourSwap.Value
-                        ? $"Alt + click did not scour {map.Name}. Check that Orbs of Scouring are reachable and that the Alt-swap works for you, or turn off 'Scour via Alt-swap'."
+                        ? $"Alt + click did not scour {map.Name}: either no Orb of Scouring is reachable (out of scours) or the Alt-swap does not work for you. Turn off 'Scour via Alt-swap' to click scour stacks directly."
                         : $"The Orb of Scouring had no effect on {map.Name}.");
                 }
 
@@ -869,9 +892,9 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
                 _usedScour++;
             }
 
-            if (!HasSpare(Orb.Alchemy))
+            if (ReserveReached(Orb.Alchemy))
             {
-                _status = OutOfOrbsMessage(Orb.Alchemy);
+                _status = ReserveMessage(Orb.Alchemy);
                 return false;
             }
 
@@ -904,9 +927,9 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
             var map = FindMap(key);
             if (map == null || !NeedsExalt(map)) continue;
 
-            if (!HasSpare(Orb.Exalted))
+            if (ReserveReached(Orb.Exalted))
             {
-                _status = OutOfOrbsMessage(Orb.Exalted);
+                _status = ReserveMessage(Orb.Exalted);
                 return false;
             }
 
@@ -1016,9 +1039,9 @@ public class MapRoller : BaseSettingsPlugin<MapRollerSettings>
         {
             $"MapRoller  [{_phase}]  {_runTimer.Elapsed:mm\\:ss}",
             summary,
-            $"Alchemy   used {_usedAlch,4}   left {CountOrbs(Orb.Alchemy),5}",
-            $"Scouring  used {_usedScour,4}   left {CountOrbs(Orb.Scouring),5}",
-            $"Exalted   used {_usedExalt,4}   left {CountOrbs(Orb.Exalted),5}",
+            $"Alchemy   used {_usedAlch,4}   seen {CountOrbs(Orb.Alchemy),5}",
+            $"Scouring  used {_usedScour,4}   seen {CountOrbs(Orb.Scouring),5}",
+            $"Exalted   used {_usedExalt,4}   seen {CountOrbs(Orb.Exalted),5}",
         };
         if (CurrencyTabMode)
         {
